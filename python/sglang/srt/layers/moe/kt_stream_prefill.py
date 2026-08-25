@@ -28,6 +28,7 @@ Entry points:
   inputs, they cannot short-circuit the dispatch.
 """
 
+import functools
 import json
 import logging
 import os
@@ -998,6 +999,32 @@ def _routing_ops():
     return _INIT_ROUTING, _FINALIZE_ROUTING
 
 
+@functools.lru_cache(maxsize=2)
+def _log_stream_swiglu_once(limit: float) -> None:
+    print(f"[KT_STREAM][swiglu] streaming-prefill clamp "
+          f"{'ACTIVE limit=%.4g' % limit if limit > 0 else 'OFF'}", flush=True)
+
+
+@functools.lru_cache(maxsize=1)
+def _swiglu_limit() -> float:
+    """The checkpoint's swiglu_limit, read the same way the module reads E/H/I."""
+    try:
+        cfg = json.load(open(os.path.join(_ckpt_dir(), "config.json")))
+        return float(cfg.get("swiglu_limit") or 0.0)
+    except Exception:
+        return 0.0
+
+
+def _apply_swiglu_limit_streaming(x: torch.Tensor) -> None:
+    """In-place asymmetric clamp on the gate/up halves. Shares the runner's implementation so
+    the streamed experts and the resident ones cannot drift apart."""
+    from sglang.srt.hardware_backend.npu.moe.activation import apply_swiglu_limit_
+
+    limit = _swiglu_limit()
+    _log_stream_swiglu_once(limit)
+    apply_swiglu_limit_(x, limit)
+
+
 def _streaming_fused_experts(
     hidden_states: torch.Tensor,
     w13: torch.Tensor,
@@ -1059,6 +1086,9 @@ def _streaming_fused_experts(
     )[0]
 
     # 3. activation: swiglu plus the re-quantisation gmm2 needs (NPUSwigluQuant).
+    #    The model's own SwiGLU clamp has to be applied here too, or the streamed experts
+    #    would differ numerically from both the CPU MoE and DeepSeek's reference.
+    _apply_swiglu_limit_streaming(permuted)
     permuted, swiglu_scale = torch.ops.npu.npu_dequant_swiglu_quant(
         permuted, quant_mode=1, activate_left=True
     )

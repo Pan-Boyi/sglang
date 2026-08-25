@@ -425,7 +425,14 @@ class KTEPWrapperMethod(FusedMoEMethodBase):
                 chunked_prefill_size=self.kt_config.chunked_prefill_size,
                 method=self.kt_config.method,
                 max_deferred_experts_per_token=layer_max_deferred,
-                swiglu_limit=layer.moe_runner_config.swiglu_limit or 0.0,
+                # Same kill switch as the NPU/streaming paths (see
+                # hardware_backend/npu/moe/activation.py: swiglu_clamp_disabled).
+                # All three must be turned off together or we create a new mismatch.
+                swiglu_limit=(
+                    0.0
+                    if os.environ.get("KT_DISABLE_SWIGLU_CLAMP", "") == "1"
+                    else (layer.moe_runner_config.swiglu_limit or 0.0)
+                ),
             )
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:

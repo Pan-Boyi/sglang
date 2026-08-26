@@ -1260,10 +1260,16 @@ def _apply_resident_layer_depool(L, topk_output, w13, s13b, w2, s2b):
         _hist_ids(topk_output.topk_ids).to(torch.int64), minlength=E
     )[:E]
     top = _pick_resident_top(counts, K)
-    torch.index_select(w13, 0, top, out=layer.w13_weight.data)
-    torch.index_select(w2, 0, top, out=layer.w2_weight.data)
-    torch.index_select(s13b, 0, top, out=layer.w13_weight_scale.data)
-    torch.index_select(s2b, 0, top, out=layer.w2_weight_scale.data)
+    # index_select(..., out=<param>.data) 在目标带 ACL 私有格式(FRACTAL_NZ)时是**静默 no-op**:
+    # torch_npu 无法往 NZ 的 out 里写, 于是把 .data 返回的临时 Tensor 重绑定到一个新分配的
+    # ND tensor 并丢弃, nn.Parameter 自己的 storage 一个字节都没动 —— 无异常无告警。
+    # 紧邻的 scale 是 ND, 所以 scale 写进去了; mask/l2g 也写进去了。结果是槽位 i 用专家 i 的
+    # 权重配专家 top[i] 的 scale, 而 CPU 又因 mask 认为 top[i] 已常驻而跳过它。
+    # Tensor.copy_ 是格式感知的, 原地写 Parameter 自己的 storage(decode NPU graph 捕获的正是它)。
+    layer.w13_weight.data.copy_(torch.index_select(w13, 0, top))
+    layer.w2_weight.data.copy_(torch.index_select(w2, 0, top))
+    layer.w13_weight_scale.data.copy_(torch.index_select(s13b, 0, top))
+    layer.w2_weight_scale.data.copy_(torch.index_select(s2b, 0, top))
     _RES_PEND[L] = (wrap, top, counts)
     if L == num_layers - 1:
         share_sum = 0.0

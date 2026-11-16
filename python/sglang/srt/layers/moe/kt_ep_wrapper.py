@@ -177,10 +177,18 @@ def create_kt_config_from_server_args(
                 "KT expert offload on NPU currently requires "
                 "--kt-num-gpu-experts >= 1"
             )
-        if server_args.tp_size != 1 or server_args.ep_size != 1:
+        experimental_tp2 = (
+            os.environ.get("KT_NPU_EXPERIMENTAL_TP2") == "1"
+            and server_args.tp_size == 2
+            and server_args.ep_size == 1
+        )
+        if (
+            server_args.tp_size != 1 or server_args.ep_size != 1
+        ) and not experimental_tp2:
             raise ValueError(
-                "KT expert offload on NPU currently supports only "
-                "--tensor-parallel-size 1 and --expert-parallel-size 1"
+                "KT expert offload on NPU requires TP=1/EP=1 by default. "
+                "Experimental TP=2/EP=1 requires KT_NPU_EXPERIMENTAL_TP2=1; "
+                "other TP/EP configurations are not supported."
             )
         if server_args.moe_a2a_backend != "none":
             raise ValueError(
@@ -404,6 +412,28 @@ class KTEPWrapperMethod(FusedMoEMethodBase):
                 self.gpu_experts_mask,
                 torch.arange(num_experts, dtype=torch.long),
                 torch.full((num_experts,), -1, dtype=torch.long),
+            )
+
+        if (
+            layer.w13_weight.device.type == "npu"
+            and os.environ.get("KT_NPU_EXPERIMENTAL_TP2") == "1"
+            and get_parallel().tp_size == 2
+        ):
+            if layer.moe_tp_size != 2:
+                raise ValueError(
+                    "Experimental NPU TP2 requires MoE tensor parallel size 2"
+                )
+            logger.warning(
+                "[KT experimental NPU TP2] layer=%s rank=%s moe_tp=%s "
+                "local_intermediate=%s full_intermediate=%s "
+                "resident_experts=%s cpu_owner=%s",
+                self.kt_config.layer_idx,
+                self.tp_rank,
+                layer.moe_tp_size,
+                intermediate_size_per_partition,
+                intermediate_size_full,
+                self.num_gpu_experts,
+                self.tp_rank == 0,
             )
 
         # 3. Initialize KT wrapper for CPU experts
